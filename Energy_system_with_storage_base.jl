@@ -11,16 +11,6 @@ include(joinpath(@__DIR__, "colors.jl"))
 
 
 # read the csv files
-df_technologies = CSV.read("technologies.csv", DataFrame,stringtype=String)
-df_fuels = CSV.read("fuels.csv", DataFrame,stringtype=String)
-df_demand = CSV.read("demand.csv", DataFrame,stringtype=String)
-df_inputratio = CSV.read("inputratio.csv", DataFrame,stringtype=String)
-df_outputratio = CSV.read("outputratio.csv", DataFrame,stringtype=String)
-df_investmentcost = CSV.read("investmentcost.csv", DataFrame,stringtype=String)
-df_variablecost = CSV.read("variablecost.csv", DataFrame,stringtype=String)
-df_emissionratio = CSV.read("emissionratio.csv", DataFrame,stringtype=String)
-df_maxcapacity = CSV.read("maxcapacity.csv", DataFrame,stringtype=String)
-df_tagdispatchabletechnology = CSV.read("tag_dispatchabletechnology.csv", DataFrame,stringtype=String)
 df_demand_timeseries = CSV.read("demand_timeseries.csv", DataFrame,stringtype=String)
 df_capacity_factor = CSV.read("capacity_factors_2018.csv", DataFrame,stringtype=String)
 
@@ -37,36 +27,27 @@ df_storagelosses = CSV.read("storagelosses.csv", DataFrame,stringtype=String)
 readin(x; default=0,dims=1) = DefaultDict(default,Dict((dims > 1 ? Tuple(row[y] for y in 1:dims) : row[1]) => row[dims+1] for row in eachrow(x)))
 
 # We define our sets from the csv files
-technologies = df_technologies.technology
-fuels = df_fuels.fuel
 hour = 1:120
 
 ### add storage here
-storages = df_storages.storage
+storages = ["Battery"]#df_storages.storage
 
 # Also, we read our input parameters via csv files
-Demand = readin(df_demand,dims=1)
-OutputRatio = readin(df_outputratio,dims=2)
-InputRatio = readin(df_inputratio,dims=2)
-VariableCost = readin(df_variablecost,dims=1)
-InvestmentCost = readin(df_investmentcost,dims=1)
-EmissionRatio = readin(df_emissionratio,dims=1)
-TagDispatchableTechnology = readin(df_tagdispatchabletechnology,dims=1)
-DemandProfile = readin(df_demand_timeseries,default=1/120,dims=2)
-CapacityFactor = readin(df_capacity_factor,default=1,dims=2)
+DemandProfile = readin(df_demand_timeseries,default=1/120,dims=1)
+CapacityFactor = readin(df_capacity_factor,default=1,dims=1)
 
 ### add additional storage parameters
 InvestmentCostStorage = readin(df_investmentcoststorage,dims=1)
 E2PRatio = readin(df_e2pratio,dims=1)
-StorageChargeEfficiency = readin(df_storagechargeefficiency,dims=2)
-StorageDisChargeEfficiency = readin(df_storagedischargeefficiency,dims=2)
-StorageLosses = readin(df_storagelosses, dims=2)
+StorageChargeEfficiency = readin(df_storagechargeefficiency,dims=1)
+StorageDisChargeEfficiency = readin(df_storagedischargeefficiency,dims=1)
+StorageLosses = readin(df_storagelosses, dims=1)
 
-# our emission limit
-EmissionLimit = 25
+# our demand
+Demand = 30
 
 # define the dictionary for max capacities with specific default value
-MaxCapacity = readin(df_maxcapacity,default=999,dims=1)
+#MaxCapacity = readin(df_maxcapacity,default=999,dims=1)
 #MaxCapacity["SolarPV"]=1000
 #MaxCapacity["WindOnshore"]=1000
 # instantiate a model with an optimizer
@@ -74,86 +55,57 @@ MaxCapacity = readin(df_maxcapacity,default=999,dims=1)
 ESM = Model(Clp.Optimizer)
 
 # this creates our variables
-@variable(ESM,TotalCost[technologies]>=0)
-@variable(ESM,Production[hour,technologies, fuels] >= 0)
-@variable(ESM,Capacity[technologies] >=0)
-@variable(ESM,Use[hour,technologies, fuels] >=0)
-@variable(ESM,Emissions[technologies] >=0)
-@variable(ESM,Curtailment[hour,fuels] >=0)
+@variable(ESM,Production[hour] >= 0)
+@variable(ESM,Capacity >=0)
 
 ### add variables
-@variable(ESM,StorageEnergyCapacity[s=storages,f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
-@variable(ESM,StorageCharge[s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
-@variable(ESM,StorageDischarge[s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
-@variable(ESM,StorageLevel[s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,StorageEnergyCapacity[s=storages; StorageDisChargeEfficiency[s]>0]>=0)
+@variable(ESM,StorageCharge[s=storages, hour; StorageDisChargeEfficiency[s]>0]>=0)
+@variable(ESM,StorageDischarge[s=storages, hour; StorageDisChargeEfficiency[s]>0]>=0)
+@variable(ESM,StorageLevel[s=storages, hour; StorageDisChargeEfficiency[s]>0]>=0)
 @variable(ESM,TotalStorageCost[storages] >= 0)
 
 ## constraints
 # Generation must meet demand
-@constraint(ESM, DemandAdequacy[h in hour,f in fuels],
-    sum(Production[h,t,f] for t in technologies) + sum(StorageDischarge[s,h,f] for s in storages if StorageDisChargeEfficiency[s,f]>0) == 
-        Demand[f]*DemandProfile[f,h] + sum(Use[h,t,f] for t in technologies)+Curtailment[h,f] + sum(StorageCharge[s,h,f] for s in storages if StorageChargeEfficiency[s,f] > 0))
-
-# calculate the total cost
-@constraint(ESM, ProductionCost[t in technologies],
-    sum(Production[h,t,f] for f in fuels, h in hour)*VariableCost[t]+Capacity[t]*InvestmentCost[t] == TotalCost[t])
-
-# limit the production by the installed capacity
-@constraint(ESM, ProductionFunction_disp[h in hour, t in technologies, f in fuels; TagDispatchableTechnology[t]>0],
-    OutputRatio[t,f]*Capacity[t]*CapacityFactor[t,h]*(1/120) >= Production[h,t,f])
+@constraint(ESM, DemandAdequacy[h in hour],
+    Production[h] + sum(StorageDischarge[s,h] for s in storages if StorageDisChargeEfficiency[s]>0) == Demand*DemandProfile[h])
 
 # for variable renewables, the production needs to be always at maximum
-@constraint(ESM, ProductionFunction_res[h in hour, t in technologies, f in fuels; TagDispatchableTechnology[t]==0],
-    OutputRatio[t,f]*Capacity[t]*CapacityFactor[t,h]*(1/120) == Production[h,t,f])
-
-# define the use by the production
-@constraint(ESM, UseFunction[h in hour,t in technologies, f in fuels],
-    InputRatio[t,f]*sum(Production[h,t,ff] for ff in fuels) == Use[h,t,f])
-
-# define the emissions
-@constraint(ESM, TechnologyEmissions[t in technologies],
-    sum(Production[h,t,f] for f in fuels, h in hour)*EmissionRatio[t] == Emissions[t])
-
-# limit the emissions
-@constraint(ESM, TotalEmissionsFunction,
-    sum(Emissions[t] for t in technologies) <= EmissionLimit)
-
-# installed capacity is limited by the maximum capacity
-@constraint(ESM, MaxCapacityFunction[t in technologies],
-    Capacity[t] <= MaxCapacity[t])
+@constraint(ESM, ProductionFunction_res[h in hour],
+    Capacity*CapacityFactor[h]*(1/120) == Production[h])
 
 ### Add storage constraints
 # storage charge is limited by storage energy capacity and E2PRatio
-@constraint(ESM, StorageChargeFunction[s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
-    StorageCharge[s,h,f] <= StorageEnergyCapacity[s,f]/E2PRatio[s])
+@constraint(ESM, StorageChargeFunction[s in storages, h in hour; StorageDisChargeEfficiency[s]>0],
+    StorageCharge[s,h] <= StorageEnergyCapacity[s]/E2PRatio[s])
 
 # storage discharge is limited by storage energy capacity and E2PRatio
-@constraint(ESM, StorageDischargeFunction[s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
-    StorageDischarge[s,h,f] <= StorageEnergyCapacity[s,f]/E2PRatio[s])
+@constraint(ESM, StorageDischargeFunction[s in storages, h in hour; StorageDisChargeEfficiency[s]>0],
+    StorageDischarge[s,h] <= StorageEnergyCapacity[s]/E2PRatio[s])
 
 # storage level depends on previous period's storage level and current period charge/discharge
-@constraint(ESM, StorageLevelFunction[s in storages, h in hour, f in fuels; h>1 && StorageDisChargeEfficiency[s,f]>0],
-    StorageLevel[s,h,f] == StorageLevel[s,h-1,f]*StorageLosses[s,f] + StorageCharge[s,h,f]*StorageChargeEfficiency[s,f] - StorageDischarge[s,h,f]/StorageDisChargeEfficiency[s,f])
+@constraint(ESM, StorageLevelFunction[s in storages, h in hour; h>1 && StorageDisChargeEfficiency[s]>0],
+    StorageLevel[s,h] == StorageLevel[s,h-1]*StorageLosses[s] + StorageCharge[s,h]*StorageChargeEfficiency[s] - StorageDischarge[s,h]/StorageDisChargeEfficiency[s])
 
 # storage level for first period does not depend on previous level but we set it to 50% energy capacity
-@constraint(ESM, StorageLevelStartFunction[s in storages, h in hour, f in fuels; h==1 && StorageDisChargeEfficiency[s,f]>0],
-    StorageLevel[s,h,f] == 0.5*StorageEnergyCapacity[s,f]+ StorageCharge[s,h,f]*StorageChargeEfficiency[s,f] - StorageDischarge[s,h,f]/StorageDisChargeEfficiency[s,f])
+@constraint(ESM, StorageLevelStartFunction[s in storages, h in hour; h==1 && StorageDisChargeEfficiency[s]>0],
+    StorageLevel[s,h] == 0.5*StorageEnergyCapacity[s]+ StorageCharge[s,h]*StorageChargeEfficiency[s] - StorageDischarge[s,h]/StorageDisChargeEfficiency[s])
 
 # storage level is limited by storage capacity
-@constraint(ESM, MaxStorageLevelFunction[s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
-    StorageLevel[s,h,f] <= StorageEnergyCapacity[s,f])
+@constraint(ESM, MaxStorageLevelFunction[s in storages, h in hour; StorageDisChargeEfficiency[s]>0],
+    StorageLevel[s,h] <= StorageEnergyCapacity[s])
 
 # storage cost are the sum of all storage technology costs
 @constraint(ESM, StorageCostFunction[s in storages],
-    TotalStorageCost[s] == sum(StorageEnergyCapacity[s,f]*InvestmentCostStorage[s] for f in fuels if StorageDisChargeEfficiency[s,f]>0))
+    TotalStorageCost[s] == sum(StorageEnergyCapacity[s]*InvestmentCostStorage[s]))
 
 # storage level at the end of a year has to equal storage level at the beginning of year
-@constraint(ESM, StorageAnnualBalanceFunction[s in storages, f in fuels; StorageDisChargeEfficiency[s,f]>0],
-    sum(StorageCharge[s,h,f] for h in hour)*StorageChargeEfficiency[s,f] - sum(StorageDischarge[s,h,f] for h in hour) / StorageDisChargeEfficiency[s,f] == 0)
+@constraint(ESM, StorageAnnualBalanceFunction[s in storages; StorageDisChargeEfficiency[s]>0],
+    sum(StorageCharge[s,h] for h in hour)*StorageChargeEfficiency[s] - sum(StorageDischarge[s,h] for h in hour) / StorageDisChargeEfficiency[s] == 0)
 
 
 # the objective function
-@objective(ESM, Min, sum(TotalCost[t] for t in technologies) + sum(TotalStorageCost[s] for s in storages))
+@objective(ESM, Min, sum(TotalStorageCost[s] for s in storages))
 
 # this starts the optimization
 # the assigned solver (here Clp) will takes care of the solution algorithm
@@ -169,43 +121,44 @@ value.(StorageDischarge)
 value.(StorageLevel)
 value.(StorageCharge)
 
-df_res_production = DataFrame(Containers.rowtable(value,Production; header = [:Hour, :Technology, :Fuel, :value]))
-df_res_capacity = DataFrame(Containers.rowtable(value,Capacity; header = [:Technology, :value]))
+#df_res_production = DataFrame(Containers.rowtable(value,Production; header = [:Hour, :value]))
+#df_res_production.Technology = "SolarPV"
+#df_res_capacity = DataFrame(Containers.rowtable(value,Capacity; header = [:value]))
 
-df_storage_production = DataFrame(Containers.rowtable(value,StorageDischarge; header = [:Technology, :Hour, :Fuel, :value]))
-df_storage_charge = DataFrame(Containers.rowtable(value,StorageCharge; header = [:Technology, :Hour, :Fuel, :value]))
-df_storage_level = DataFrame(Containers.rowtable(value,StorageLevel; header = [:Technology, :Hour, :Fuel, :value]))
+df_storage_production = DataFrame(Containers.rowtable(value,StorageDischarge; header = [:Technology, :Hour, :value]))
+df_storage_charge = DataFrame(Containers.rowtable(value,StorageCharge; header = [:Technology, :Hour, :value]))
+df_storage_level = DataFrame(Containers.rowtable(value,StorageLevel; header = [:Technology, :Hour, :value]))
 
-append!(df_res_production, df_storage_production)
+#append!(df_res_production, df_storage_production)
 
-transform!(df_res_production, "Technology" => ByRow(x-> colors[x]) => "Color")
-transform!(df_res_capacity, "Technology" => ByRow(x-> colors[x]) => "Color")
+transform!(df_storage_production, "Technology" => ByRow(x-> colors[x]) => "Color")
+#transform!(df_res_capacity, "Technology" => ByRow(x-> colors[x]) => "Color")
 
 # and some plots
-groupedbar(
-    df_res_production.Fuel,
-    df_res_production.value,
-    group=df_res_production.Technology,
-    bar_position=:stack,
-    title="Production by Technology",
-    linewidth=0,
-    color=df_res_production.Color,
-    legend=false
-)
+#groupedbar(
+    #df_res_production.Fuel,
+    #df_storage_production.value,
+    #group=df_res_production.Technology,
+    #bar_position=:stack,
+    #title="Production by Technology",
+    #linewidth=0,
+    #color=df_res_production.Color,
+    #legend=false
+#)
 
 bar(
-    df_res_capacity.Technology,
-    df_res_capacity.value,
+    df_storage_production.Technology,
+    df_storage_production.value,
     title="Installed Capacity by Technology",
-    color=df_res_capacity.Color,
+    color=df_storage_production.Color,
     linewidth=0,
     rotation=90
 )
 
-gdf_production_by_fuel = groupby(df_res_production, :Fuel)
-sto_charge = Dict((row.Technology, row.Fuel, row.Hour) => row.value for row in eachrow(df_storage_charge))
+#gdf_production_by_fuel = groupby(df_res_production, :Fuel)
+sto_charge = Dict((row.Technology, row.Hour) => row.value for row in eachrow(df_storage_charge))
 
-n_fuels = length(gdf_production_by_fuel)
+#n_fuels = length(gdf_production_by_fuel)
 plts = map(enumerate(pairs(gdf_production_by_fuel))) do (i,(k,v))
     p = groupedbar(
         v.Hour,
@@ -235,12 +188,12 @@ end
 plot(plts..., layout=(n_fuels,1), size=(1200,1200))
 
 
-sto_prod = Dict((row.Technology, row.Fuel, row.Hour) => row.value for row in eachrow(df_storage_production))
-sto_lvl = Dict((row.Technology, row.Fuel, row.Hour) => row.value for row in eachrow(df_storage_level))
+sto_prod = Dict((row.Technology, row.Hour) => row.value for row in eachrow(df_storage_production))
+sto_lvl = Dict((row.Technology, row.Hour) => row.value for row in eachrow(df_storage_level))
 
 plt_storage_lvl = map(storages) do s
     
-   val = [[get(sto_prod, (s, f, h), 0) for h in hour ] for f in fuels if StorageDisChargeEfficiency[s,f]>0]
+   val = [get(sto_prod, (s, h), 0) for h in hour ]
 
    color = colors[s]
     p = bar(
@@ -253,7 +206,7 @@ plt_storage_lvl = map(storages) do s
         linewidth=0
     )
 
-    val_charg = [[get(sto_charge, (s, f, h), 0) for h in hour ] for f in fuels if StorageDisChargeEfficiency[s,f]>0]
+    val_charg = [get(sto_charge, (s, h), 0) for h in hour ]
 
     bar!(p,
         hour,
@@ -266,7 +219,7 @@ plt_storage_lvl = map(storages) do s
     )
 
 
-    val_lvl = [[get(sto_lvl, (s, f, h), 0) for h in hour ] for f in fuels if StorageDisChargeEfficiency[s,f]>0]
+    val_lvl = [get(sto_lvl, (s, h), 0) for h in hour ]
 
 
     p2 = twinx(p)

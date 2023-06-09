@@ -1,4 +1,4 @@
-﻿storage,fuel,value
-Battery,Power,0.9
-PHS,Power,0.9
-H2Tank,H2,0.95
+﻿storage,value
+Battery,0.9
+PHS,0.9
+H2Tank,0.95
