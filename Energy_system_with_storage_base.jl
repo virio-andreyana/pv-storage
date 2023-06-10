@@ -30,7 +30,7 @@ readin(x; default=0,dims=1) = DefaultDict(default,Dict((dims > 1 ? Tuple(row[y] 
 hour = 1:120
 
 ### add storage here
-storages = ["Battery"]#df_storages.storage
+storages = ["Battery","H2Tank"]#df_storages.storage
 
 # Also, we read our input parameters via csv files
 DemandProfile = readin(df_demand_timeseries,default=1/120,dims=1)
@@ -121,44 +121,52 @@ value.(StorageDischarge)
 value.(StorageLevel)
 value.(StorageCharge)
 
-#df_res_production = DataFrame(Containers.rowtable(value,Production; header = [:Hour, :value]))
-#df_res_production.Technology = "SolarPV"
+value.(sum(StorageCharge[s,h] for h in hour)*StorageChargeEfficiency[s] for s in storages)
+value.(sum(StorageDischarge[s,h] for h in hour) / StorageDisChargeEfficiency[s] for s in storages)
+
+df_res_production = DataFrame(Containers.rowtable(value,Production; header = [:Hour, :value]))
+insertcols!(df_res_production, :Technology => "SolarPV")
 #df_res_capacity = DataFrame(Containers.rowtable(value,Capacity; header = [:value]))
 
 df_storage_production = DataFrame(Containers.rowtable(value,StorageDischarge; header = [:Technology, :Hour, :value]))
 df_storage_charge = DataFrame(Containers.rowtable(value,StorageCharge; header = [:Technology, :Hour, :value]))
 df_storage_level = DataFrame(Containers.rowtable(value,StorageLevel; header = [:Technology, :Hour, :value]))
 
-#append!(df_res_production, df_storage_production)
+append!(df_res_production,df_storage_production)
 
-transform!(df_storage_production, "Technology" => ByRow(x-> colors[x]) => "Color")
+transform!(df_res_production, "Technology" => ByRow(x-> colors[x]) => "Color")
 #transform!(df_res_capacity, "Technology" => ByRow(x-> colors[x]) => "Color")
 
 # and some plots
-#groupedbar(
-    #df_res_production.Fuel,
-    #df_storage_production.value,
-    #group=df_res_production.Technology,
-    #bar_position=:stack,
-    #title="Production by Technology",
-    #linewidth=0,
-    #color=df_res_production.Color,
-    #legend=false
-#)
+insertcols!(df_res_production, :Fuel => "Power")
 
-bar(
-    df_storage_production.Technology,
-    df_storage_production.value,
-    title="Installed Capacity by Technology",
-    color=df_storage_production.Color,
+groupedbar(
+    df_res_production.Fuel,
+    df_res_production.value,
+    group=df_res_production.Technology,
+    bar_position=:stack,
+    title="Production by Technology",
     linewidth=0,
-    rotation=90
+    color=df_res_production.Color,
+    legend=false
 )
 
-#gdf_production_by_fuel = groupby(df_res_production, :Fuel)
+if length(storages) > 1
+    bar(
+        df_res_production.Technology,
+        df_res_production.value,
+        title="Installed Capacity by Technology",
+        color=df_res_production.Color,
+        linewidth=0,
+        rotation=90
+    )
+end
+
+gdf_production_by_fuel = groupby(df_res_production, :Fuel)
+
 sto_charge = Dict((row.Technology, row.Hour) => row.value for row in eachrow(df_storage_charge))
 
-#n_fuels = length(gdf_production_by_fuel)
+n_fuels = length(gdf_production_by_fuel)
 plts = map(enumerate(pairs(gdf_production_by_fuel))) do (i,(k,v))
     p = groupedbar(
         v.Hour,
@@ -173,14 +181,14 @@ plts = map(enumerate(pairs(gdf_production_by_fuel))) do (i,(k,v))
         legend_column=5
     )
 
-    d = [Demand[k[1]]*DemandProfile[k[1],h] for h in hour]
-    u = sum(value.(Use)[:,t, k[1]] for t in technologies)
-    c = [sum(get(sto_charge, (s, k[1], h), 0) for s in storages) for h in hour]
-    du = d .+ u.data
-    dus = d .+ u.data .+ c
+    d = [Demand*DemandProfile[h] for h in hour]
+    #u = sum(value.(Use)[:,t, k[1]] for t in technologies)
+    #c = [sum(get(sto_charge, (s, k[1], h), 0) for s in storages) for h in hour]
+    #du = d .+ u.data
+    #dus = d .+ c
     plot!(p, hour, d, color=:black, linewidth=2, label="Demand")
-    plot!(p, hour, du, color=:black, linestyle=:dash, linewidth=2, label="Demand + Use")
-    plot!(p, hour, dus, color=:black, linestyle=:dot, linewidth=2, label="Demand + Use + Storage")
+    #plot!(p, hour, du, color=:black, linestyle=:dash, linewidth=2, label="Demand + Use")
+    #plot!(p, hour, d, color=:Blue, linestyle=:dot, linewidth=2, label="Demand + Storage")
 
     return p
 end
